@@ -1,14 +1,38 @@
 # Locus Communis Sync
 
-Obsidian plugin that syncs excerpts from your [Locus Communis](https://locuscommunis.com) commonplace book into a folder in your vault.
+Obsidian plugin that syncs excerpts from your [Locus Communis](https://locuscommunis.com) commonplace book into a folder in your vault. Each excerpt becomes its own Markdown file with YAML frontmatter (id, attribution, author, book, source, date), so it slots cleanly into Dataview queries, graph view, and your existing note structure.
 
 ## Status
 
-v0.1 — one-way pull (Locus Communis → vault). Server is source of truth; local edits in the synced folder will be overwritten on next sync.
+v0.1 — one-way pull (Locus Communis → vault). The server is the source of truth; any local edits inside the synced folder are overwritten on the next sync. Push direction (Obsidian → Locus Communis) is on the roadmap.
 
-## Install (development)
+## How it works
 
-This plugin isn't in the community directory yet. To run it locally:
+The plugin authenticates against `locuscommunis.com/api/sync/*` with a personal access token you generate from the Locus Communis website — it never sees your Supabase credentials, your password, or any details about the backend. Tokens are hashed server-side and revocable per-device, so losing a laptop doesn't mean rotating everything.
+
+Sync is incremental by default: the plugin tracks the timestamp of the last successful sync and only fetches excerpts created since then. A "Full resync" command bypasses the watermark and re-pulls everything (useful if you wipe the synced folder or want to repair drift).
+
+## Install
+
+### From the community directory
+
+Once accepted into the Obsidian community plugins directory: Settings → Community plugins → Browse → search "Locus Communis Sync" → Install → Enable. Then generate a sync token from locuscommunis.com → Settings → **Connected apps**, paste it into the plugin's settings tab, click **Verify**, then **Sync now**.
+
+### Via BRAT (before community-directory acceptance)
+
+Until the plugin is accepted into the official directory, the cleanest way to install it (and get auto-updates) is through [BRAT — Beta Reviewers Auto-update Tool](https://github.com/TfTHacker/obsidian42-brat):
+
+1. In Obsidian: Settings → Community plugins → Browse → install **BRAT** by TfTHacker → Enable
+2. Open BRAT's settings tab → click **Add Beta plugin**
+3. Paste this repository URL: `https://github.com/obscuromagna/locus-communis-sync`
+4. Leave version as "Latest version" → click **Add Plugin**
+5. BRAT downloads `main.js` + `manifest.json` from the latest GitHub release and installs the plugin into your vault
+6. In Obsidian: Settings → Community plugins → enable **Locus Communis Sync**
+7. Generate a sync token at locuscommunis.com → Settings → **Connected apps**, paste it into the plugin's settings tab, click **Verify**, then **Sync now**
+
+BRAT polls for new GitHub releases automatically, so subsequent `npm version` + `git push --follow-tags` cycles deliver updates to BRAT users without any manual steps.
+
+### From source (development)
 
 1. Clone this repo into `<your-vault>/.obsidian/plugins/locus-communis-sync`
 2. `npm install`
@@ -17,6 +41,11 @@ This plugin isn't in the community directory yet. To run it locally:
 5. Generate a sync token at locuscommunis.com → Settings → **Connected apps**
 6. In Obsidian: open the plugin's settings tab and paste the token, then click **Verify**
 7. Click **Sync now**, run the command "Sync excerpts from Locus Communis", or click the ribbon icon
+
+## Commands
+
+- **Sync excerpts from Locus Communis** — incremental pull using the last-sync watermark
+- **Full resync (re-pull every excerpt)** — ignores the watermark, useful after wiping the folder or fixing drift
 
 ## Roadmap
 
