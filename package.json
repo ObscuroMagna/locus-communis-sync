@@ -1,6 +1,6 @@
 {
   "name": "locus-communis-sync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Obsidian plugin that syncs excerpts from Locus Communis into your vault.",
   "main": "main.js",
   "scripts": {
@@ -8,7 +8,12 @@
     "build": "node esbuild.config.mjs production",
     "version": "node version-bump.mjs && git add manifest.json versions.json"
   },
-  "keywords": ["obsidian", "plugin", "commonplace", "locus-communis"],
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "commonplace",
+    "locus-communis"
+  ],
   "author": "Ethan",
   "license": "MIT",
   "devDependencies": {
