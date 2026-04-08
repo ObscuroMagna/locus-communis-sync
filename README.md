@@ -24,7 +24,7 @@ Until the plugin is accepted into the official directory, the cleanest way to in
 
 1. In Obsidian: Settings → Community plugins → Browse → install **BRAT** by TfTHacker → Enable
 2. Open BRAT's settings tab → click **Add Beta plugin**
-3. Paste this repository URL: `https://github.com/obscuromagna/locus-communis-sync`
+3. Paste this repository URL: `https://github.com/ObscuroMagna/locus-communis-sync`
 4. Leave version as "Latest version" → click **Add Plugin**
 5. BRAT downloads `main.js` + `manifest.json` from the latest GitHub release and installs the plugin into your vault
 6. In Obsidian: Settings → Community plugins → enable **Locus Communis Sync**
