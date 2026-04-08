@@ -68,6 +68,12 @@ export default class LocusCommunisPlugin extends Plugin {
       callback: () => this.syncNow(),
     });
 
+    this.addCommand({
+      id: "full-resync",
+      name: "Full resync (re-pull every excerpt)",
+      callback: () => this.syncNow({ full: true }),
+    });
+
     this.addSettingTab(new LocusCommunisSettingTab(this.app, this));
   }
 
@@ -119,26 +125,56 @@ export default class LocusCommunisPlugin extends Plugin {
     return me;
   }
 
-  async syncNow() {
+  /**
+   * Pull excerpts from the API and write them to the vault.
+   *
+   * By default, only fetches excerpts created at or after `lastSyncedAt`,
+   * which keeps recurring syncs cheap. Pass `{ full: true }` to ignore the
+   * watermark and re-pull everything (useful after schema changes or if the
+   * vault folder was wiped).
+   *
+   * Note: incremental sync is "new and updated" only — server-side deletes
+   * are not propagated to the vault. Use Full resync to clean up.
+   */
+  async syncNow({ full = false }: { full?: boolean } = {}) {
     try {
       if (!this.settings.token) {
         new Notice("Locus Communis: paste a sync token in settings first.");
         return;
       }
 
-      new Notice("Locus Communis: fetching excerpts…");
+      // Capture the request start timestamp BEFORE the fetch so the next
+      // incremental sync doesn't miss excerpts created during this request.
+      const requestStartedAt = new Date().toISOString();
+      const since = full ? null : this.settings.lastSyncedAt;
+
+      new Notice(
+        since
+          ? "Locus Communis: fetching new excerpts…"
+          : "Locus Communis: fetching all excerpts…"
+      );
+
       const params = new URLSearchParams();
       if (this.settings.includePublicBook) params.set("include_public", "1");
+      if (since) params.set("since", since);
       const qs = params.toString();
+
       const data = await this.apiGet<ExcerptsResponse>(
         `/api/sync/excerpts${qs ? `?${qs}` : ""}`
       );
 
       await this.writeExcerpts(data.excerpts);
 
-      this.settings.lastSyncedAt = new Date().toISOString();
+      this.settings.lastSyncedAt = requestStartedAt;
       await this.saveSettings();
-      new Notice(`Locus Communis: synced ${data.count} excerpts.`);
+
+      if (data.count === 0) {
+        new Notice("Locus Communis: already up to date.");
+      } else {
+        new Notice(
+          `Locus Communis: synced ${data.count} excerpt${data.count === 1 ? "" : "s"}.`
+        );
+      }
     } catch (err) {
       console.error("[locus-communis] sync failed", err);
       new Notice(`Locus Communis sync failed: ${(err as Error).message}`);
@@ -302,12 +338,19 @@ class LocusCommunisSettingTab extends PluginSettingTab {
           })
       );
 
-    new Setting(containerEl).addButton((b) =>
-      b
-        .setButtonText("Sync now")
-        .setCta()
-        .onClick(() => this.plugin.syncNow())
-    );
+    new Setting(containerEl)
+      .addButton((b) =>
+        b
+          .setButtonText("Sync now")
+          .setCta()
+          .onClick(() => this.plugin.syncNow())
+      )
+      .addButton((b) =>
+        b
+          .setButtonText("Full resync")
+          .setTooltip("Re-pull every excerpt, ignoring the last-sync watermark.")
+          .onClick(() => this.plugin.syncNow({ full: true }))
+      );
 
     if (this.plugin.settings.lastSyncedAt) {
       containerEl.createEl("p", {
