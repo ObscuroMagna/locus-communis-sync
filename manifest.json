@@ -1,0 +1,10 @@
+{
+  "id": "locus-communis-sync",
+  "name": "Locus Communis Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Sync excerpts from your Locus Communis commonplace book into your Obsidian vault.",
+  "author": "Ethan",
+  "authorUrl": "https://locuscommunis.com",
+  "isDesktopOnly": false
+}
