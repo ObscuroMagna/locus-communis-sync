@@ -1,0 +1,46 @@
+name: Release
+
+# Triggered when a tag matching the Obsidian version convention is pushed.
+# The version-bump script + `npm version` produces tags like `0.1.0` (no `v`
+# prefix), which is what Obsidian's community directory expects.
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Verify required files exist
+        run: |
+          test -f main.js
+          test -f manifest.json
+          test -f versions.json
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release create "$tag" \
+            --title "$tag" \
+            --generate-notes \
+            main.js manifest.json versions.json

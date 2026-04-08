@@ -18,21 +18,34 @@ This plugin isn't in the community directory yet. To run it locally:
 6. In Obsidian: open the plugin's settings tab and paste the token, then click **Verify**
 7. Click **Sync now**, run the command "Sync excerpts from Locus Communis", or click the ribbon icon
 
-## How auth works
-
-The plugin never talks to Supabase directly. It calls `/api/sync/excerpts` and `/api/sync/me` on the Locus Communis server with a personal access token in the `Authorization` header. The server hashes the token, looks it up in `sync_tokens`, and uses the service role to query the requesting user's data.
-
-This means:
-
-- No credentials in the plugin (no email, no password, no Supabase keys)
-- Tokens are revocable per-device from the LC settings page
-- The plugin works regardless of how you originally signed in (Google or email)
-- The API is a stable JSON contract, so plugin versions keep working across schema changes
-- The plugin bundle is tiny — no `@supabase/supabase-js` dependency
-
 ## Roadmap
 
+- [x] Incremental sync using `since=<timestamp>` (Full resync command available for clean re-pulls)
 - [ ] Push direction (Obsidian → LC) for notes added in a designated folder
-- [ ] Incremental sync using `since=<timestamp>` (the API supports it; the plugin doesn't pass it yet)
 - [ ] Conflict detection on local edits
+- [ ] Server-side delete propagation (currently orphan files linger until Full resync)
 - [ ] Tag mapping from `excerpt_tags`
+
+## Releasing a new version
+
+Releases are cut by tag-pushing — the GitHub Actions workflow at `.github/workflows/release.yml` builds `main.js` and attaches it (plus `manifest.json` and `versions.json`) as release assets.
+
+```bash
+# Bump version (also updates manifest.json + versions.json)
+npm version patch    # or minor / major / 0.2.0
+
+# Push the tag — Actions takes over
+git push --follow-tags
+```
+
+Within a minute or two, a new release appears on GitHub with the three required files attached. Obsidian's community directory polls the latest release for these files when users install or update the plugin.
+
+## Submitting to the Obsidian community directory
+
+Not done yet. When ready:
+
+1. Confirm `manifest.json` is filled in correctly (`id`, `name`, `version`, `minAppVersion`, `description`, `author`, `authorUrl`, `isDesktopOnly`)
+2. Make sure there's at least one tagged release with `main.js`, `manifest.json`, and `versions.json` as assets
+3. Fork [obsidianmd/obsidian-releases](https://github.com/obsidianmd/obsidian-releases) and add an entry to `community-plugins.json` for `locus-communis-sync` pointing to this repo
+4. Open a PR — review usually takes a few days, sometimes longer
+5. Address any feedback (common asks: don't use `innerHTML`, use `requestUrl` instead of `fetch`, no `console.log` in shipping builds, no `var`, etc.)
