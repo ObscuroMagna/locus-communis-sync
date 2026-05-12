@@ -385,12 +385,19 @@ export default class LocusCommunisPlugin extends Plugin {
   }
 
   /**
-   * Rewrite the library: book pages under Books/, a Base index at the root,
-   * and an Unlinked Excerpts.md catch-all for excerpts with no work_id.
+   * Rewrite the library:
+   *   Books/<title>.md       — one page per work, metadata + note only.
+   *                            Excerpts are NOT inlined here so the page
+   *                            stays a focused "card" for the work itself.
+   *   Excerpts/<quote>.md    — one page per work-linked excerpt, with a
+   *                            wikilink back to its Books/<title> page.
+   *   Unlinked Excerpts.md   — rolling catch-all for excerpts that aren't
+   *                            attached to any work.
+   *   Locus Communis.base    — Bases index across Books/.
    *
-   * Server is the source of truth — existing book pages are overwritten in
-   * place. Old files from the previous per-excerpt layout (v0.1.x) are left
-   * alone; the user can delete them manually.
+   * Server is the source of truth — existing book/excerpt pages are
+   * overwritten in place. Old files from previous layouts are left alone;
+   * the user can delete them manually.
    */
   async writeLibrary(excerpts: Excerpt[], notes: Note[]): Promise<{
     bookCount: number;
@@ -398,8 +405,10 @@ export default class LocusCommunisPlugin extends Plugin {
   }> {
     const rootPath = normalizePath(this.settings.vaultFolder);
     const booksPath = normalizePath(`${this.settings.vaultFolder}/Books`);
+    const excerptsPath = normalizePath(`${this.settings.vaultFolder}/Excerpts`);
     await this.ensureFolder(rootPath);
     await this.ensureFolder(booksPath);
+    await this.ensureFolder(excerptsPath);
 
     // Group by work_id. Build book records seeded from notes (which carry
     // authoritative work metadata via the /sync/notes embed) and filled in
@@ -458,6 +467,16 @@ export default class LocusCommunisPlugin extends Plugin {
         updated_at: group.note?.updated_at || "",
         path,
       });
+
+      // Per-excerpt files, each wikilinked back to the book file. The
+      // book wikilink is derived from the book's filename (without .md)
+      // so Obsidian resolves it without needing aliases.
+      const bookWikilink = filename.replace(/\.md$/, "");
+      for (const e of group.excerpts) {
+        const exFilename = excerptFilename(e);
+        const exPath = normalizePath(`${excerptsPath}/${exFilename}`);
+        await this.writeFile(exPath, excerptToMarkdownFile(e, group, bookWikilink));
+      }
     }
     this.lastSyncedNotes = freshLastSynced;
 
@@ -475,6 +494,11 @@ export default class LocusCommunisPlugin extends Plugin {
     // Bases index.
     const basePath = normalizePath(`${rootPath}/Locus Communis.base`);
     await this.writeFile(basePath, renderBase());
+
+    // Readme — documents how to add notes so users know to create a ## Note
+    // heading themselves (we no longer emit an empty placeholder).
+    const readmePath = normalizePath(`${rootPath}/README.md`);
+    await this.writeFile(readmePath, renderReadme());
 
     return { bookCount: byWork.size, unlinkedCount: unlinked.length };
   }
@@ -556,8 +580,9 @@ function bookFilename(g: BookGroup): string {
 
 /**
  * Render a single book page. YAML frontmatter carries structured fields so the
- * root `Locus Communis.base` can index across books; the body lists the note
- * (if any) followed by excerpts in chronological order.
+ * root `Locus Communis.base` can index across books; the body has the work's
+ * private note (if any). Excerpts live in their own files under Excerpts/ and
+ * link back here via wikilink.
  */
 function bookToMarkdown(g: BookGroup): string {
   const lines = ["---"];
@@ -578,22 +603,63 @@ function bookToMarkdown(g: BookGroup): string {
   if (g.creator) lines.push(`*${g.creator}${g.year ? `, ${g.year}` : ""}*`);
   lines.push("");
 
-  // Always emit the Note section so two-way sync has a target to type into.
-  // Empty string is fine — the section stays, just without a body.
-  lines.push("## Note");
-  lines.push("");
-  lines.push((g.note?.note || "").trim());
-  lines.push("");
-
-  if (g.excerpts.length > 0) {
-    lines.push("## Excerpts");
+  // Only emit the Note section when a note already exists on the server.
+  // Otherwise a keystroke in an empty placeholder would create a note row
+  // the user never intended. Users who want a note can add `## Note`
+  // manually — parseBookFile picks it up on the next modify.
+  if (g.note) {
+    lines.push("## Note");
     lines.push("");
-    for (const e of g.excerpts) {
-      lines.push(renderExcerpt(e));
-      lines.push("");
-    }
+    lines.push(g.note.note.trim());
+    lines.push("");
   }
 
+  // Excerpts now live in per-file pages under Excerpts/, wikilinked back
+  // to this book page. The book page stays a focused "card" for the work:
+  // metadata + private note only.
+
+  return lines.join("\n");
+}
+
+function excerptFilename(e: Excerpt): string {
+  // Build a readable preview from the first ~50 chars of the quote, then
+  // append a short id suffix to prevent collisions. Same naming pattern
+  // as bookFilename — readable left, stable right.
+  const preview = sanitizeFilename(e.quote || "").slice(0, 50).trim() || "excerpt";
+  return `${preview} — ${e.id.slice(0, 8)}.md`;
+}
+
+/**
+ * Render a single excerpt as its own .md file. Frontmatter carries the
+ * structured fields so Bases can index across Excerpts/; the body has the
+ * quote, attribution, and a wikilink back to the book page.
+ */
+function excerptToMarkdownFile(e: Excerpt, g: BookGroup, bookWikilink: string): string {
+  const lines = ["---"];
+  lines.push(`excerpt_id: ${e.id}`);
+  if (e.work_id) lines.push(`work_id: ${e.work_id}`);
+  if (g.title) lines.push(`work_title: "${escapeYaml(g.title)}"`);
+  if (g.creator) lines.push(`work_creator: "${escapeYaml(g.creator)}"`);
+  if (e.attribution) lines.push(`attribution: "${escapeYaml(e.attribution)}"`);
+  if (e.source) lines.push(`source: "${escapeYaml(e.source)}"`);
+  const date = (e.dated_at ?? e.created_at)?.split("T")[0];
+  if (date) lines.push(`date: ${date}`);
+  lines.push("tags:");
+  lines.push("  - locus-communis");
+  lines.push("  - locus-communis/excerpt");
+  lines.push("---");
+  lines.push("");
+  lines.push(`> ${e.quote.replace(/\n/g, "\n> ")}`);
+  lines.push("");
+  const attrBits: string[] = [];
+  if (e.attribution) {
+    attrBits.push(e.source ? `[${e.attribution}](${e.source})` : e.attribution);
+  }
+  if (date) attrBits.push(date);
+  if (attrBits.length > 0) lines.push(`— ${attrBits.join(" · ")}`);
+  lines.push("");
+  lines.push(`From [[${bookWikilink}]]`);
+  lines.push("");
   return lines.join("\n");
 }
 
@@ -662,6 +728,54 @@ function renderBase(): string {
     "      - media_type",
     "      - excerpt_count",
     "      - has_note",
+    "",
+  ].join("\n");
+}
+
+function renderReadme(): string {
+  return [
+    "# Locus Communis",
+    "",
+    "This folder mirrors your [Locus Communis](https://locuscommunis.com) library.",
+    "Each work you've excerpted gets its own page under `Books/` (metadata + your",
+    "private note for the work). Excerpts live in their own files under",
+    "`Excerpts/`, each wikilinked back to the book it came from. Open",
+    "`Locus Communis.base` for a table view across every book.",
+    "",
+    "## Writing notes on a book",
+    "",
+    "Notes are private — they never leave your account. To write a note on a book,",
+    "open its page and add a `## Note` heading, then type under it:",
+    "",
+    "```markdown",
+    "## Note",
+    "",
+    "My thoughts on this work…",
+    "```",
+    "",
+    "A couple of seconds after you stop typing, the plugin pushes the note back to",
+    "Locus Communis. On your next sync (from any device) it comes back with the",
+    "same content.",
+    "",
+    "You can reference excerpts inside a note by copying the excerpt text from the",
+    "web app — the plugin will preserve it in both directions.",
+    "",
+    "## Conflicts",
+    "",
+    "If the server has a newer version of a note than you do (e.g. you edited it",
+    "on another device), the plugin keeps the server copy and tucks your local",
+    "edit under an `## Unsynced local edit` heading so you can merge by hand.",
+    "",
+    "## Excerpts",
+    "",
+    "Excerpts are overwritten each sync — the web app is the source of truth.",
+    "Edit the quote or attribution in Locus Communis, not here. Excerpts that",
+    "aren't attached to a work land in `Unlinked Excerpts.md` at the root.",
+    "",
+    "## Resync",
+    "",
+    "Run **Sync Locus Communis** from the command palette or the ribbon any time.",
+    "Everything under this folder is safe to rebuild.",
     "",
   ].join("\n");
 }
