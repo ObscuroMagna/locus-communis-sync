@@ -4,7 +4,7 @@ Obsidian plugin that syncs excerpts from your [Locus Communis](https://locuscomm
 
 ## Status
 
-v0.4 — a one-way export of your library, restructured around works. Locus Communis is the source of truth: every sync rewrites these files, so write your own thoughts elsewhere in the vault and link to them. Each work gets a note (metadata, your work note, and a live table of its passages) with its passages in a folder beside it. Every passage carries the margin log you kept on it: notes, stamps, and strikes, dated so you can search or sort by when you marked something.
+v0.4: a one-way export of your library, restructured around works. Locus Communis is the source of truth: every sync rewrites these files, so write your own thoughts elsewhere in the vault and link to them. Each work gets a note (metadata, your work note, and a live table of its passages) with its passages in a folder beside it. Every passage carries the margin log you kept on it: notes, stamps, and strikes, dated so you can search or sort by when you marked something.
 
 ## Disclosures
 
@@ -14,7 +14,7 @@ v0.4 — a one-way export of your library, restructured around works. Locus Comm
 
 ## How it works
 
-The plugin authenticates against `locuscommunis.com/api/sync/*` with a personal access token you generate from the Locus Communis website — it never sees your Supabase credentials, your password, or any details about the backend. Tokens are hashed server-side and revocable per-device, so losing a laptop doesn't mean rotating everything.
+The plugin authenticates against `locuscommunis.com/api/sync/*` with a personal access token you generate from the Locus Communis website. It never sees your Supabase credentials, your password, or any details about the backend. Tokens are hashed server-side and revocable per-device, so losing a laptop doesn't mean rotating everything.
 
 Sync is incremental by default: the plugin tracks the timestamp of the last successful sync and only fetches excerpts created since then. A "Full resync" command bypasses the watermark and re-pulls everything (useful if you wipe the synced folder or want to repair drift).
 
@@ -50,27 +50,26 @@ BRAT polls for new GitHub releases automatically, so subsequent `npm version` + 
 
 ## Commands
 
-- **Sync excerpts from Locus Communis** — incremental pull using the last-sync watermark
-- **Full resync (re-pull every excerpt)** — ignores the watermark, useful after wiping the folder or fixing drift
+- **Sync now** (command palette, or the ribbon icon): rebuilds the whole library from Locus Communis. There is no separate full resync; every sync is a full rebuild, so one command is the whole surface.
 
 ## Roadmap
 
 - [x] Incremental sync using `since=<timestamp>` (Full resync command available for clean re-pulls)
 - [x] Margin log on each passage (notes, stamps, strikes), searchable by date
 - [x] Per-work folders with an embedded base in the work note
-- [ ] Push direction — DROPPED 2026-08-01: the export is one-way by design
+- [ ] Push direction: DROPPED 2026-08-01: the export is one-way by design
 - [ ] Server-side delete propagation (currently orphan files linger until Full resync)
 - [ ] Tag mapping from `excerpt_tags`
 
 ## Releasing a new version
 
-Releases are cut by tag-pushing — the GitHub Actions workflow at `.github/workflows/release.yml` builds `main.js` and attaches it (plus `manifest.json` and `versions.json`) as release assets.
+Releases are cut by tag-pushing. The GitHub Actions workflow at `.github/workflows/release.yml` builds `main.js` and attaches it (plus `manifest.json` and `versions.json`) as release assets.
 
 ```bash
 # Bump version (also updates manifest.json + versions.json)
 npm version patch    # or minor / major / 0.2.0
 
-# Push the tag — Actions takes over
+# Push the tag, Actions takes over
 git push --follow-tags
 ```
 
@@ -83,5 +82,5 @@ Not done yet. When ready:
 1. Confirm `manifest.json` is filled in correctly (`id`, `name`, `version`, `minAppVersion`, `description`, `author`, `authorUrl`, `isDesktopOnly`)
 2. Make sure there's at least one tagged release with `main.js`, `manifest.json`, and `versions.json` as assets
 3. Fork [obsidianmd/obsidian-releases](https://github.com/obsidianmd/obsidian-releases) and add an entry to `community-plugins.json` for `locus-communis-sync` pointing to this repo
-4. Open a PR — review usually takes a few days, sometimes longer
+4. Open a PR. Review usually takes a few days, sometimes longer
 5. Address any feedback (common asks: don't use `innerHTML`, use `requestUrl` instead of `fetch`, no `console.log` in shipping builds, no `var`, etc.)

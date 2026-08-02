@@ -97,7 +97,10 @@ export default class LocusCommunisPlugin extends Plugin {
 
     this.addCommand({
       id: "sync-now",
-      name: "Sync Locus Communis",
+      // Obsidian prefixes commands with the plugin name, so naming this
+      // "Sync Locus Communis" would read "Locus Communis Sync: Sync
+      // Locus Communis" in the palette.
+      name: "Sync now",
       callback: () => void this.syncNow(),
     });
 
@@ -631,13 +634,13 @@ function renderReadme(): string {
     "",
     "## Excerpts",
     "",
-    "Excerpts are overwritten each sync — the web app is the source of truth.",
+    "Excerpts are overwritten each sync: the web app is the source of truth.",
     "Edit the quote or attribution in Locus Communis, not here. Excerpts that",
     "aren't attached to a work land in `Unlinked Excerpts.md` at the root.",
     "",
     "## Resync",
     "",
-    "Run **Sync Locus Communis** from the command palette or the ribbon any time.",
+    "Run **Sync now** from the command palette, or click the ribbon icon, any time.",
     "Everything under this folder is safe to rebuild.",
     "",
   ].join("\n");
@@ -722,7 +725,7 @@ class LocusCommunisSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Sync work notes")
       .setDesc(
-        "Include your per-work notes on each book page. Notes are strictly private — they never leave your account."
+        "Include your per-work notes on each book page. Notes are strictly private: they never leave your account."
       )
       .addToggle((t) =>
         t
