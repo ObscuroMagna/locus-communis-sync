@@ -23,8 +23,6 @@ interface LocusCommunisSettings {
   syncNotes: boolean;
   /** ISO timestamp of the most recent successful excerpt sync. */
   lastSyncedAt: string | null;
-  /** ISO timestamp of the most recent successful notes sync. */
-  lastNotesSyncedAt: string | null;
   /** Display name of the connected LC user, populated by /api/sync/me. */
   connectedAs: string | null;
 }
@@ -36,9 +34,15 @@ const DEFAULT_SETTINGS: LocusCommunisSettings = {
   includePublicBook: false,
   syncNotes: true,
   lastSyncedAt: null,
-  lastNotesSyncedAt: null,
   connectedAs: null,
 };
+
+/** One margin entry: a note you wrote, or a stamp you pressed. */
+interface LogEntry {
+  kind: "note" | "stamp";
+  body: string;
+  created_at: string;
+}
 
 interface Excerpt {
   id: string;
@@ -51,6 +55,10 @@ interface Excerpt {
   is_public: boolean;
   dated_at: string | null;
   created_at: string;
+  /** Strike count (mark stamps), summed server-side. Absent on v1. */
+  strikes?: number;
+  /** Notes and stamps, oldest first. Absent on v1 payloads. */
+  log?: LogEntry[];
 }
 
 interface ExcerptsResponse {
@@ -79,55 +87,30 @@ interface NotesResponse {
 export default class LocusCommunisPlugin extends Plugin {
   settings!: LocusCommunisSettings;
 
-  // In-memory mirror of the last-known server note for each work_id. Used
-  // to (a) detect real local edits vs. our own writes and (b) supply the
-  // `client_updated_at` watermark in PUTs for LWW conflict detection.
-  private lastSyncedNotes = new Map<
-    string,
-    { note: string; updated_at: string; path: string }
-  >();
-
-  private pushTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private inflightPushes = new Set<string>();
-  private readonly pushDebounceMs = 1500;
 
   async onload() {
     await this.loadSettings();
 
     this.addRibbonIcon("book-open", "Sync Locus Communis", () => {
-      this.syncNow();
+      void this.syncNow();
     });
 
     this.addCommand({
       id: "sync-now",
       name: "Sync Locus Communis",
-      callback: () => this.syncNow(),
+      callback: () => void this.syncNow(),
     });
-
-    this.addCommand({
-      id: "full-resync",
-      name: "Full resync (rebuild book pages)",
-      callback: () => this.syncNow({ full: true }),
-    });
-
-    // Two-way notes sync: watch Books/ pages for edits and push the Note
-    // section back to the server. Excerpts and frontmatter are ignored.
-    this.registerEvent(
-      this.app.vault.on("modify", (file) => {
-        if (file instanceof TFile) this.onFileModified(file);
-      })
-    );
 
     this.addSettingTab(new LocusCommunisSettingTab(this.app, this));
   }
 
   onunload() {
-    for (const timer of this.pushTimers.values()) clearTimeout(timer);
-    this.pushTimers.clear();
+    // Nothing to tear down: the export is one-way, so there are no
+    // watchers or pending pushes (2026-08-01 ruling).
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<LocusCommunisSettings> | null);
   }
 
   async saveSettings() {
@@ -179,8 +162,11 @@ export default class LocusCommunisPlugin extends Plugin {
    *
    * Layout:
    *   <vaultFolder>/
-   *     Locus Communis.base     — Bases index of all books
-   *     Books/<Title>.md        — one page per work (excerpts + note inline)
+   *     Library.base            — Bases table of every work
+   *     Works/<Title>.md        — the work: metadata, note, and an
+   *                               embedded base of its own passages
+   *     Works/<Title>/          — that work's passages, one file each,
+   *                               carrying their margin log
    *     Unlinked Excerpts.md    — excerpts without a work_id
    *
    * Incremental sync is intentionally dropped for this layout: rewriting a
@@ -192,7 +178,7 @@ export default class LocusCommunisPlugin extends Plugin {
    * sync is a full rebuild. The `lastSyncedAt` timestamp is still updated for
    * display.
    */
-  async syncNow(_opts: { full?: boolean } = {}) {
+  async syncNow() {
     try {
       if (!this.settings.token) {
         new Notice("Locus Communis: paste a sync token in settings first.");
@@ -221,8 +207,7 @@ export default class LocusCommunisPlugin extends Plugin {
       );
 
       this.settings.lastSyncedAt = requestStartedAt;
-      this.settings.lastNotesSyncedAt = requestStartedAt;
-      await this.saveSettings();
+        await this.saveSettings();
 
       const parts: string[] = [];
       parts.push(`${bookCount} book${bookCount === 1 ? "" : "s"}`);
@@ -236,134 +221,6 @@ export default class LocusCommunisPlugin extends Plugin {
       console.error("[locus-communis] sync failed", err);
       new Notice(`Locus Communis sync failed: ${(err as Error).message}`);
     }
-  }
-
-  /**
-   * Fired on every vault modify. Filters to Books/ pages, extracts the note
-   * section, and schedules a debounced PUT if the note differs from the
-   * last-synced content. Compares against the in-memory map, not a
-   * suppression flag, so our own `writeFile` calls don't echo back as edits.
-   */
-  private onFileModified(file: TFile) {
-    const booksPrefix = normalizePath(`${this.settings.vaultFolder}/Books/`);
-    if (!file.path.startsWith(booksPrefix)) return;
-    if (!this.settings.syncNotes || !this.settings.token) return;
-
-    const existing = this.pushTimers.get(file.path);
-    if (existing) clearTimeout(existing);
-    this.pushTimers.set(
-      file.path,
-      setTimeout(() => {
-        this.pushTimers.delete(file.path);
-        this.maybePushNote(file).catch((err) => {
-          console.error("[locus-communis] note push failed", err);
-        });
-      }, this.pushDebounceMs)
-    );
-  }
-
-  private async maybePushNote(file: TFile) {
-    if (this.inflightPushes.has(file.path)) {
-      // Reschedule behind the in-flight one so the latest edit wins.
-      this.onFileModified(file);
-      return;
-    }
-
-    const content = await this.app.vault.read(file);
-    const parsed = parseBookFile(content);
-    if (!parsed.work_id) return;
-
-    const known = this.lastSyncedNotes.get(parsed.work_id);
-    if (!known) return; // Not yet hydrated by a sync — nothing to diff against.
-    if (parsed.note === known.note) return; // Our own write, or no real change.
-
-    this.inflightPushes.add(file.path);
-    try {
-      const res = await this.putNote(
-        parsed.work_id,
-        parsed.note,
-        known.updated_at || null
-      );
-      if (res.kind === "ok") {
-        this.lastSyncedNotes.set(parsed.work_id, {
-          note: res.note.trim(),
-          updated_at: res.updated_at,
-          path: file.path,
-        });
-      } else if (res.kind === "conflict") {
-        // Server has a newer edit. Pull remote into the file so the user can
-        // merge by hand, and update the in-memory map to match.
-        new Notice(
-          "Locus Communis: note conflict — server version kept. Your edit was saved as a duplicate heading."
-        );
-        await this.writeConflictMarker(file, parsed, res.server);
-        this.lastSyncedNotes.set(parsed.work_id, {
-          note: res.server.note.trim(),
-          updated_at: res.server.updated_at,
-          path: file.path,
-        });
-      }
-    } finally {
-      this.inflightPushes.delete(file.path);
-    }
-  }
-
-  private async putNote(
-    workId: string,
-    note: string,
-    clientUpdatedAt: string | null
-  ): Promise<
-    | { kind: "ok"; note: string; updated_at: string }
-    | { kind: "conflict"; server: { note: string; updated_at: string } }
-  > {
-    const res = await requestUrl({
-      url: this.apiUrl("/api/sync/notes"),
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${this.settings.token}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        work_id: workId,
-        note,
-        client_updated_at: clientUpdatedAt,
-      }),
-      throw: false,
-    });
-    if (res.status === 200) {
-      const body = res.json as { note: string; updated_at: string };
-      return { kind: "ok", note: body.note, updated_at: body.updated_at };
-    }
-    if (res.status === 409) {
-      const body = res.json as { server: { note: string; updated_at: string } };
-      return { kind: "conflict", server: body.server };
-    }
-    const err = res.json as { error?: string } | undefined;
-    throw new Error(err?.error || `HTTP ${res.status}`);
-  }
-
-  /**
-   * On 409, rewrite the book page with the server note and tuck the local
-   * unsynced edit under an "## Unsynced local edit" subsection so it isn't
-   * lost. User picks a side and re-saves.
-   */
-  private async writeConflictMarker(
-    file: TFile,
-    parsed: ParsedBookFile,
-    server: { note: string; updated_at: string }
-  ) {
-    const current = await this.app.vault.read(file);
-    const { before, after } = splitAtNoteSection(current);
-    const merged =
-      before +
-      "## Note\n\n" +
-      server.note +
-      "\n\n" +
-      "## Unsynced local edit\n\n" +
-      parsed.note +
-      "\n\n" +
-      after;
-    await this.app.vault.modify(file, merged);
   }
 
   async ensureFolder(path: string) {
@@ -386,14 +243,10 @@ export default class LocusCommunisPlugin extends Plugin {
 
   /**
    * Rewrite the library:
-   *   Books/<title>.md       — one page per work, metadata + note only.
-   *                            Excerpts are NOT inlined here so the page
-   *                            stays a focused "card" for the work itself.
-   *   Excerpts/<quote>.md    — one page per work-linked excerpt, with a
-   *                            wikilink back to its Books/<title> page.
-   *   Unlinked Excerpts.md   — rolling catch-all for excerpts that aren't
-   *                            attached to any work.
-   *   Locus Communis.base    — Bases index across Books/.
+   *   Works/<title>.md       — the work: metadata, your note, and an
+   *                            embedded base listing its passages.
+   *   Works/<title>/…md      — one page per passage, with its margin log.
+   *   Library.base           — Bases table across every work.
    *
    * Server is the source of truth — existing book/excerpt pages are
    * overwritten in place. Old files from previous layouts are left alone;
@@ -404,11 +257,9 @@ export default class LocusCommunisPlugin extends Plugin {
     unlinkedCount: number;
   }> {
     const rootPath = normalizePath(this.settings.vaultFolder);
-    const booksPath = normalizePath(`${this.settings.vaultFolder}/Books`);
-    const excerptsPath = normalizePath(`${this.settings.vaultFolder}/Excerpts`);
+    const worksPath = normalizePath(`${this.settings.vaultFolder}/Works`);
     await this.ensureFolder(rootPath);
-    await this.ensureFolder(booksPath);
-    await this.ensureFolder(excerptsPath);
+    await this.ensureFolder(worksPath);
 
     // Group by work_id. Build book records seeded from notes (which carry
     // authoritative work metadata via the /sync/notes embed) and filled in
@@ -453,32 +304,28 @@ export default class LocusCommunisPlugin extends Plugin {
       group.excerpts.push(e);
     }
 
-    // Write one file per book and remember the authoritative note content /
-    // timestamp so the modify handler can distinguish local edits from our
-    // own writes and supply the LWW watermark on PUT.
-    const freshLastSynced = new Map<string, { note: string; updated_at: string; path: string }>();
+    // One file per work, then its passages beneath it.
     for (const group of byWork.values()) {
       group.excerpts.sort((a, b) => a.created_at.localeCompare(b.created_at));
       const filename = bookFilename(group);
-      const path = normalizePath(`${booksPath}/${filename}`);
-      await this.writeFile(path, bookToMarkdown(group));
-      freshLastSynced.set(group.work_id, {
-        note: (group.note?.note || "").trim(),
-        updated_at: group.note?.updated_at || "",
-        path,
-      });
+      const path = normalizePath(`${worksPath}/${filename}`);
+      // The work's excerpts live in a sibling folder of the same name, so
+      // the work note can embed a base scoped to exactly its own passages.
+      const workFolder = filename.replace(/\.md$/, "");
+      const workFolderPath = normalizePath(`${worksPath}/${workFolder}`);
+      await this.ensureFolder(workFolderPath);
+      await this.writeFile(path, bookToMarkdown(group, workFolder));
 
       // Per-excerpt files, each wikilinked back to the book file. The
       // book wikilink is derived from the book's filename (without .md)
       // so Obsidian resolves it without needing aliases.
-      const bookWikilink = filename.replace(/\.md$/, "");
+      const bookWikilink = workFolder;
       for (const e of group.excerpts) {
         const exFilename = excerptFilename(e);
-        const exPath = normalizePath(`${excerptsPath}/${exFilename}`);
+        const exPath = normalizePath(`${workFolderPath}/${exFilename}`);
         await this.writeFile(exPath, excerptToMarkdownFile(e, group, bookWikilink));
       }
     }
-    this.lastSyncedNotes = freshLastSynced;
 
     // Unlinked excerpts — single catch-all file so they still sync.
     const unlinkedPath = normalizePath(`${rootPath}/Unlinked Excerpts.md`);
@@ -492,7 +339,7 @@ export default class LocusCommunisPlugin extends Plugin {
     }
 
     // Bases index.
-    const basePath = normalizePath(`${rootPath}/Locus Communis.base`);
+    const basePath = normalizePath(`${rootPath}/Library.base`);
     await this.writeFile(basePath, renderBase());
 
     // Readme — documents how to add notes so users know to create a ## Note
@@ -513,50 +360,6 @@ interface BookGroup {
   note: Note | null;
   excerpts: Excerpt[];
 }
-
-/* ─────────────── Markdown parsing (two-way sync) ─────────────── */
-
-interface ParsedBookFile {
-  work_id: string | null;
-  note: string;
-}
-
-/**
- * Extract the `work_id` from YAML frontmatter and the body of the `## Note`
- * section from a book page. Deliberately tolerant: if the file has no Note
- * heading (user deleted it, or hand-wrote the page) we treat the note as
- * empty. The section runs from `## Note` to the next `##` heading or EOF.
- */
-function parseBookFile(content: string): ParsedBookFile {
-  let work_id: string | null = null;
-
-  const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n?/);
-  if (fmMatch) {
-    const idLine = fmMatch[1].match(/^work_id:\s*(\S+)\s*$/m);
-    if (idLine) work_id = idLine[1].replace(/^["']|["']$/g, "");
-  }
-
-  const noteMatch = content.match(/\n## Note\s*\n([\s\S]*?)(?=\n## |\s*$)/);
-  const note = noteMatch ? noteMatch[1].trim() : "";
-
-  return { work_id, note };
-}
-
-/**
- * Split a book page into the chunks around the Note section so a conflict
- * marker can be inserted without clobbering frontmatter or excerpts.
- */
-function splitAtNoteSection(content: string): { before: string; after: string } {
-  const m = content.match(/\n## Note\s*\n([\s\S]*?)(?=\n## |\s*$)/);
-  if (!m) return { before: content + "\n\n", after: "" };
-  const start = m.index ?? 0;
-  const end = start + m[0].length;
-  return {
-    before: content.slice(0, start + 1), // keep the leading newline
-    after: content.slice(end),
-  };
-}
-
 /* ─────────────── Markdown formatting ─────────────── */
 
 function escapeYaml(s: string): string {
@@ -584,7 +387,7 @@ function bookFilename(g: BookGroup): string {
  * private note (if any). Excerpts live in their own files under Excerpts/ and
  * link back here via wikilink.
  */
-function bookToMarkdown(g: BookGroup): string {
+function bookToMarkdown(g: BookGroup, workFolder: string): string {
   const lines = ["---"];
   lines.push(`work_id: ${g.work_id}`);
   if (g.title) lines.push(`title: "${escapeYaml(g.title)}"`);
@@ -606,7 +409,8 @@ function bookToMarkdown(g: BookGroup): string {
   // Only emit the Note section when a note already exists on the server.
   // Otherwise a keystroke in an empty placeholder would create a note row
   // the user never intended. Users who want a note can add `## Note`
-  // manually — parseBookFile picks it up on the next modify.
+  // manually, but this file is rewritten whole every sync, so anything
+  // typed here is lost. Notes belong in the web app.
   if (g.note) {
     lines.push("## Note");
     lines.push("");
@@ -614,9 +418,30 @@ function bookToMarkdown(g: BookGroup): string {
     lines.push("");
   }
 
-  // Excerpts now live in per-file pages under Excerpts/, wikilinked back
-  // to this book page. The book page stays a focused "card" for the work:
-  // metadata + private note only.
+  // The work's passages live in a sibling folder of the same name. An
+  // embedded base scoped to that folder means the note shows a live,
+  // sortable table of its own excerpts without duplicating their text.
+  lines.push("## Passages");
+  lines.push("");
+  lines.push("```base");
+  lines.push("filters:");
+  lines.push("  and:");
+  lines.push(`    - file.inFolder("${workFolder}")`);
+  lines.push('    - file.hasTag("locus-communis/excerpt")');
+  lines.push("views:");
+  lines.push("  - type: table");
+  lines.push("    name: Passages");
+  lines.push("    order:");
+  lines.push("      - file.name");
+  lines.push("      - date");
+  lines.push("      - strikes");
+  lines.push("      - log_count");
+  lines.push("      - log_last");
+  lines.push("    sort:");
+  lines.push("      - property: date");
+  lines.push("        direction: DESC");
+  lines.push("```");
+  lines.push("");
 
   return lines.join("\n");
 }
@@ -644,38 +469,73 @@ function excerptToMarkdownFile(e: Excerpt, g: BookGroup, bookWikilink: string): 
   if (e.source) lines.push(`source: "${escapeYaml(e.source)}"`);
   const date = (e.dated_at ?? e.created_at)?.split("T")[0];
   if (date) lines.push(`date: ${date}`);
+  // The margin log, summarised in frontmatter so a base can sort and
+  // filter on it. Body lines below carry the readable thread; these are
+  // what make "everything I marked in July" a query rather than a grep.
+  const log = e.log ?? [];
+  const strikes = e.strikes ?? 0;
+  if (strikes > 0) lines.push(`strikes: ${strikes}`);
+  if (log.length > 0) {
+    lines.push(`log_count: ${log.length}`);
+    lines.push(`log_first: ${logDate(log[0].created_at)}`);
+    lines.push(`log_last: ${logDate(log[log.length - 1].created_at)}`);
+  }
   lines.push("tags:");
   lines.push("  - locus-communis");
   lines.push("  - locus-communis/excerpt");
   lines.push("---");
   lines.push("");
-  lines.push(`> ${e.quote.replace(/\n/g, "\n> ")}`);
-  lines.push("");
-  const attrBits: string[] = [];
-  if (e.attribution) {
-    attrBits.push(e.source ? `[${e.attribution}](${e.source})` : e.attribution);
-  }
-  if (date) attrBits.push(date);
-  if (attrBits.length > 0) lines.push(`— ${attrBits.join(" · ")}`);
+  lines.push(...quoteBlock(e));
   lines.push("");
   lines.push(`From [[${bookWikilink}]]`);
   lines.push("");
+
+  lines.push(...logLines(e));
   return lines.join("\n");
 }
 
-function renderExcerpt(e: Excerpt): string {
-  const parts: string[] = [];
-  parts.push(`> ${e.quote.replace(/\n/g, "\n> ")}`);
-  parts.push("");
-  const attrBits: string[] = [];
+/** ISO day for a log line: sortable, searchable, no time noise. */
+function logDate(iso: string): string {
+  return (iso || "").split("T")[0];
+}
+
+/**
+ * The quote block both surfaces share: blockquote, then the citation
+ * line. Extracted so a passage reads identically whether it lives in its
+ * work's folder or the unlinked catch-all.
+ */
+function quoteBlock(e: Excerpt): string[] {
+  const lines = [`> ${e.quote.replace(/\n/g, "\n> ")}`, ""];
+  const bits: string[] = [];
   if (e.attribution) {
-    attrBits.push(e.source ? `[${e.attribution}](${e.source})` : e.attribution);
+    bits.push(e.source ? `[${e.attribution}](${e.source})` : e.attribution);
   }
   const date = (e.dated_at ?? e.created_at)?.split("T")[0];
-  if (date) attrBits.push(date);
-  if (attrBits.length > 0) parts.push(`— ${attrBits.join(" · ")}`);
-  parts.push(`<!-- excerpt:${e.id} -->`);
-  return parts.join("\n");
+  if (date) bits.push(date);
+  if (bits.length > 0) lines.push(`— ${bits.join(" · ")}`);
+  return lines;
+}
+
+/**
+ * The margin log as body lines: ISO date first so a month reads as a
+ * plain-text search and the lines sort lexically. Shared by both
+ * surfaces, so an unlinked passage keeps the marks made on it.
+ */
+function logLines(e: Excerpt): string[] {
+  const log = e.log ?? [];
+  const strikes = e.strikes ?? 0;
+  if (log.length === 0 && strikes === 0) return [];
+  const lines = ["## Log", ""];
+  if (strikes > 0) lines.push(`- ${logDate(e.created_at)} · struck ϟ ×${strikes}`);
+  for (const entry of log) {
+    if (entry.kind === "note") {
+      lines.push(`- ${logDate(entry.created_at)} · note :: ${entry.body.trim().replace(/\n/g, "\n  ")}`);
+    } else {
+      lines.push(`- ${logDate(entry.created_at)} · stamp ${entry.body}`);
+    }
+  }
+  lines.push("");
+  return lines;
 }
 
 /**
@@ -702,8 +562,9 @@ function unlinkedToMarkdown(excerpts: Excerpt[]): string {
   lines.push("");
   const sorted = [...excerpts].sort((a, b) => a.created_at.localeCompare(b.created_at));
   for (const e of sorted) {
-    lines.push(renderExcerpt(e));
+    lines.push(...quoteBlock(e));
     lines.push("");
+    lines.push(...logLines(e));
   }
   return lines.join("\n");
 }
@@ -717,10 +578,13 @@ function renderBase(): string {
   return [
     "filters:",
     "  and:",
-    '    - \'file.folder.startsWith("Locus Communis/Books")\'',
+    // Tag, not folder: works sit in Works/ while their passages sit in
+    // per-work subfolders BENEATH it, and a folder prefix would sweep
+    // every excerpt into the library table too.
+    '    - \'file.hasTag("locus-communis/book")\'',
     "views:",
     "  - type: table",
-    "    name: Books",
+    "    name: Works",
     "    order:",
     "      - file.name",
     "      - creator",
@@ -728,6 +592,9 @@ function renderBase(): string {
     "      - media_type",
     "      - excerpt_count",
     "      - has_note",
+    "    sort:",
+    "      - property: file.name",
+    "        direction: ASC",
     "",
   ].join("\n");
 }
@@ -737,34 +604,30 @@ function renderReadme(): string {
     "# Locus Communis",
     "",
     "This folder mirrors your [Locus Communis](https://locuscommunis.com) library.",
-    "Each work you've excerpted gets its own page under `Books/` (metadata + your",
-    "private note for the work). Excerpts live in their own files under",
-    "`Excerpts/`, each wikilinked back to the book it came from. Open",
-    "`Locus Communis.base` for a table view across every book.",
     "",
-    "## Writing notes on a book",
-    "",
-    "Notes are private — they never leave your account. To write a note on a book,",
-    "open its page and add a `## Note` heading, then type under it:",
-    "",
-    "```markdown",
-    "## Note",
-    "",
-    "My thoughts on this work…",
+    "```",
+    "Works/",
+    "  <Work>.md        the work: metadata, your note, and a live table",
+    "                   of its passages",
+    "  <Work>/          that work's passages, one file each, with the",
+    "                   margin log you kept on them",
+    "Library.base       a table across every work",
     "```",
     "",
-    "A couple of seconds after you stop typing, the plugin pushes the note back to",
-    "Locus Communis. On your next sync (from any device) it comes back with the",
-    "same content.",
+    "Each passage carries its log in the body (dated lines you can search,",
+    "like `2026-07`) and a summary in frontmatter (`log_count`, `log_first`,",
+    "`log_last`, `strikes`) so a base can sort and filter on it.",
     "",
-    "You can reference excerpts inside a note by copying the excerpt text from the",
-    "web app — the plugin will preserve it in both directions.",
+    "The export is one-way: Locus Communis is the source of truth and every",
+    "sync rewrites these files. Write freely in your own notes elsewhere in",
+    "the vault and link to these; anything you type INSIDE them is replaced",
+    "on the next sync.",
     "",
-    "## Conflicts",
+    "## Notes on a work",
     "",
-    "If the server has a newer version of a note than you do (e.g. you edited it",
-    "on another device), the plugin keeps the server copy and tucks your local",
-    "edit under an `## Unsynced local edit` heading so you can merge by hand.",
+    "A work's `## Note` section mirrors the note you wrote in Locus Communis.",
+    "It is private and never leaves your account. Write it in the web app:",
+    "anything typed here is replaced on the next sync.",
     "",
     "## Excerpts",
     "",
@@ -793,7 +656,6 @@ class LocusCommunisSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Locus Communis Sync" });
 
     new Setting(containerEl)
       .setName("Server URL")
@@ -889,12 +751,6 @@ class LocusCommunisSettingTab extends PluginSettingTab {
           .setButtonText("Sync now")
           .setCta()
           .onClick(() => this.plugin.syncNow())
-      )
-      .addButton((b) =>
-        b
-          .setButtonText("Full resync")
-          .setTooltip("Re-pull everything and rebuild book pages.")
-          .onClick(() => this.plugin.syncNow({ full: true }))
       );
 
     if (this.plugin.settings.lastSyncedAt) {

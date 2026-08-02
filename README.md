@@ -4,7 +4,13 @@ Obsidian plugin that syncs excerpts from your [Locus Communis](https://locuscomm
 
 ## Status
 
-v0.1 — one-way pull (Locus Communis → vault). The server is the source of truth; any local edits inside the synced folder are overwritten on the next sync. Push direction (Obsidian → Locus Communis) is on the roadmap.
+v0.4 — a one-way export of your library, restructured around works. Locus Communis is the source of truth: every sync rewrites these files, so write your own thoughts elsewhere in the vault and link to them. Each work gets a note (metadata, your work note, and a live table of its passages) with its passages in a folder beside it. Every passage carries the margin log you kept on it: notes, stamps, and strikes, dated so you can search or sort by when you marked something.
+
+## Disclosures
+
+- **Account required.** The plugin is useless without a Locus Communis account and a sync token generated from your Account page there.
+- **Network use.** The plugin talks to exactly one remote service: your Locus Communis deployment (`locuscommunis.com` by default, configurable). It only reads: your excerpts, book pages, and work notes. The plugin sends no vault content anywhere.
+- **No telemetry.** The plugin collects no analytics and phones home to nothing besides the sync API described above.
 
 ## How it works
 
@@ -24,7 +30,7 @@ Until the plugin is accepted into the official directory, the cleanest way to in
 
 1. In Obsidian: Settings → Community plugins → Browse → install **BRAT** by TfTHacker → Enable
 2. Open BRAT's settings tab → click **Add Beta plugin**
-3. Paste this repository URL: `https://github.com/ObscuroMagna/locus-communis-sync`
+3. Paste this repository URL: `https://github.com/portdecker/locus-communis-sync`
 4. Leave version as "Latest version" → click **Add Plugin**
 5. BRAT downloads `main.js` + `manifest.json` from the latest GitHub release and installs the plugin into your vault
 6. In Obsidian: Settings → Community plugins → enable **Locus Communis Sync**
@@ -50,8 +56,9 @@ BRAT polls for new GitHub releases automatically, so subsequent `npm version` + 
 ## Roadmap
 
 - [x] Incremental sync using `since=<timestamp>` (Full resync command available for clean re-pulls)
-- [ ] Push direction (Obsidian → LC) for notes added in a designated folder
-- [ ] Conflict detection on local edits
+- [x] Margin log on each passage (notes, stamps, strikes), searchable by date
+- [x] Per-work folders with an embedded base in the work note
+- [ ] Push direction — DROPPED 2026-08-01: the export is one-way by design
 - [ ] Server-side delete propagation (currently orphan files linger until Full resync)
 - [ ] Tag mapping from `excerpt_tags`
 
